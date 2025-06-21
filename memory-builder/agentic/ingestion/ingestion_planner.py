@@ -58,32 +58,55 @@ def chunking_assistant_node(state: MessagesState):
     """Generate chunking strategy for document indexing."""
     return {"messages": llm.invoke(state["messages"])}
 
-def get_chunking_prompt(envelope):
+def truncate_long_values(obj, char_limit=3000):
+    """Recursively truncate string values in a dictionary or list."""
+    if isinstance(obj, dict):
+        return {
+            k: truncate_long_values(v, char_limit)
+            for k, v in obj.items()
+        }
+    elif isinstance(obj, list):
+        return [truncate_long_values(item, char_limit) for item in obj]
+    elif isinstance(obj, str):
+        return (obj[:char_limit] + "...[truncated]") if len(obj) > char_limit else obj
+    else:
+        return obj
+
+def get_chunking_prompt(envelope, char_limit=3000):
+    keys_to_remove = ['pdf', 'screenshots']
+    # Filter out specific keys
+    filtered_envelope = {k: v for k, v in envelope.items() if k not in keys_to_remove}
+    # Recursively truncate long values
+    truncated_envelope = truncate_long_values(filtered_envelope, char_limit)
+
     return f"""You are a Chunking Strategy Agent.
 
-    Analyze the document structure below and propose a LlamaIndex indexing strategy.
+    Analyze the document structure below and propose a LlamaIndex ingestion strategy.
+    Part of your strategy you have to define the indices you are going to use. The following indices are available including their parameters.
+    And you also need to give a name for the query so then when the index is going to be used by an LLM, it knows what it does.
 
-    Examples:
-    - Use HierarchicalNodeParser + AutoMerging if the document has deeply nested headers.
-    - Use SentenceWindowNodeParser for flat, continuous prose.
-    - Use SemanticSplitterNodeParser for concept-level segmentation.
+    1. Simple Sentence Index
+    2. Sentence Window Index
+        parameters:
+        - window_size: int
+    2. Auto Merging Index
+        - chunk_sizes: list[int], for instance [2048, 512, 128]
+    3. Semantic Index
+        - buffer_size (int): number of sentences to group together when evaluating semantic similarity.
+        - include_metadata (bool): whether to include metadata in nodes.
 
     Return a JSON like:
     [{{
-    "strategy": "hierarchical",
-    "node_parser": "HierarchicalNodeParser",
-    "index_type": "VectorStoreIndex",
-    "query_node_description": "This hierarchical query tool can be used to extract hierarchical information from the data",
+    "strategy": "SentenceWindowIndex",
+    "query_node_description": "This will split the document on sentences with overlapp specified by the window size",
     "params": {{
-        "leaf_parser": "SentenceWindowNodeParser",
-        "window_size": 5,
-        "storage_context": true
+        "window_size": 3
     }},
-    "reasoning": "Clear section headers indicate a hierarchical layout."
+    "reasoning": "Propose text with concepts that span accross, therefore sentence window index is a possible candidate"
     }}] where multiple strategies returned in a list
 
-    Document Structure:
-    {envelope}
+    Document Structure (this include the actual text + other metadata):
+    {truncated_envelope}
     """
 
 chunking_judge_prompt = """You are a strategy reviewer. Here's the proposed chunking/indexing plan:
@@ -138,7 +161,7 @@ reflection_chunking = create_reflection_graph(assistant_graph, chunking_judge_gr
 reflection_chunking = reflection_chunking.compile()
 
 def chunking_node(state):
-    prompt = get_chunking_prompt(state.envelope)
+    prompt = get_chunking_prompt(state.envelope.get('final_structured_output'))
     result = reflection_chunking.invoke({"messages": prompt})
 
     ai_message = next(

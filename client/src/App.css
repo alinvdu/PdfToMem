@@ -1,5 +1,12 @@
 .App {
   text-align: center;
+  width: 100%;
+  height: 100%;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
 }
 
 .App-logo {
@@ -36,3 +43,243 @@
     transform: rotate(360deg);
   }
 }
+
+/* Global Styles */
+body, html {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background-color: #2e2e2e;
+  color: #fff;
+  font-family: sans-serif;
+}
+
+.app {
+  height: 100%;
+  position: relative;
+}
+
+/* Search Container */
+.search-container {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.search-box-wrapper {
+  width: 800px;
+  background-color: #3e3e3e;
+  padding: 20px;
+  border-radius: 25px;
+  box-sizing: border-box;
+}
+
+.search-box-wrapper-extended {
+  width: 800px;
+  background-color: #3e3e3e;
+  padding: 20px;
+  border-radius: 25px;
+  box-sizing: border-box;
+}
+
+.search-textarea {
+  width: 100%;
+  height: 50;
+  background-color: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 10px;
+  color: #fff;
+  resize: none;
+  font-size: 14px;
+  box-sizing: border-box;
+}
+
+.search-textarea:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px #6e6e6e;
+}
+
+.button-row {
+  margin-top: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.btn {
+  background-color: #6e6e6e;
+  border: none;
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin-right: 10px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+}
+
+.btn-query {
+  background-color: #6e6e6e;
+  border: none;
+  border-radius: 4px;
+  padding: 8px 12px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.btn:disabled {
+  background-color: #555;
+  cursor: not-allowed;
+}
+
+.btn:hover:not(:disabled) {
+  background-color: #8e8e8e;
+}
+
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 3px solid rgba(255,255,255,0.3);
+  border-top: 3px solid #fff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Modal Styles */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: #2e2e2e;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background-color: #3e3e3e;
+  padding: 20px;
+  border-radius: 8px;
+  width: 800px;
+  max-height: 80%;
+  min-height: 150px;
+  overflow-y: auto;
+}
+
+.close-btn {
+  background-color: transparent;
+  border: none;
+  color: #fff;
+  font-size: 20px;
+  cursor: pointer;
+  float: right;
+  position: absolute;
+  top: 20px;
+  right: 20px;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.tab-button {
+  background-color: #6e6e6e;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 10px;
+  margin-right: 5px;
+  margin-bottom: 5px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.tab-button.active {
+  background-color: #8e8e8e;
+}
+
+.tab-content {
+  background-color: #4e4e4e;
+  padding: 10px;
+  border-radius: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+  color: #fff;
+}
+
+.full-screen-message {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+}
+
+.tool-selector {
+  background: transparent;
+  padding: 10px;
+  border-radius: 3px;
+  color: white;
+
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+
+  /* Add your own background arrow */
+  background-image: url("data:image/svg+xml;charset=US-ASCII,%3Csvg%20width%3D%2210%22%20height%3D%226%22%20viewBox%3D%220%200%2010%206%22%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%3E%3Cpath%20d%3D%22M0%200l5%206%205-6z%22%20fill%3D%22%23fff%22/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-size: 10px 6px;
+
+  /* 2. Position the new arrow */
+  background-position: calc(100% - 1em) center;
+
+  /* 3. Add padding so text doesn’t collide */
+  padding-right: 2em;
+
+  /* Optional styling to make it look nicer */
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  line-height: 1.2;
+}
+
+.ingestion-inner {
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+input[type="file"]::-webkit-file-upload-text {
+  visibility: hidden;
+}
+/* Firefox */
+input[type="file"]::-moz-file-upload-text {
+  visibility: hidden;
+}
+/* New spec */
+input[type="file"]::file-selector-button { /* this is the button itself */
+  /* you can style the button here */
+}
+input[type="file"]::file-selector-text {
+  visibility: hidden;
+}
+

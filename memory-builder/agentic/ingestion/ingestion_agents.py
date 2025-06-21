@@ -1,26 +1,47 @@
+import base64
 from langgraph.graph import StateGraph, END
 from langgraph.types import Command as LGCommand
-from langgraph.prebuilt import create_react_agent
+from langgraph.prebuilt import create_react_agent, ToolNode
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage
 import json
 
 from langchain.tools import tool
 from pydantic import BaseModel, Field
 from typing import List
 from configs import MCPConfig
-import openai
-
 from langchain.globals import set_debug
 from typing_extensions import Annotated
-
 from openai import OpenAI
-
-from trustcall import create_extractor
+import fitz
+import camelot
+import tempfile
+from io import BytesIO
+import os
+import pytesseract
+from PIL import Image
+import io
 
 client = OpenAI()
 
 set_debug(True)
+
+def save_base64_images_to_disk(base64_images: list, output_dir: str = "screenshots"):
+    os.makedirs(output_dir, exist_ok=True)
+    for i, img_b64 in enumerate(base64_images, 1):
+        img_data = base64.b64decode(img_b64)
+        with open(os.path.join(output_dir, f"screenshot_page_{i}.png"), "wb") as f:
+            f.write(img_data)
+
+def cap_text_length(text_list: list, max_chars: int = 8000) -> str:
+    """Concatenate list of page texts and cap total character length."""
+    combined = "\n\n".join((page["text"] or "") for page in text_list)
+    return combined[:max_chars]
+
+def cap_text_length_raw(text_list: list, max_chars: int = 8000) -> str:
+    """Concatenate list of page texts and cap total character length."""
+    combined = "\n\n".join((elem or "") for elem in text_list)
+    return combined[:max_chars]
 
 # ────────────────────────────────────────────────
 # STATE DEFINITION
@@ -43,17 +64,24 @@ class PDFBytesInput(BaseModel):
 @tool(args_schema=PDFBytesInput)
 def parse_text(pdf_bytes: bytes) -> list:
     """
-    Extracts raw, continuous text from a digital PDF.
+    Extracts raw, continuous text from a digital PDF. This is a good idea to use for nicely structured PDF document with clear text that can be extracted.
+    If the PDF can only be parsed by OCR this tool will not work.
     
     Returns:
         A single string containing the parsed text from all pages.
     """
-    return [
-        {
-            "page": 1,
-            "text": "This is the text from page 1 of the PDF.",
-        }
-    ]
+    results = []
+    
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            text = page.get_text()
+            results.append({
+                "page": page_num + 1,
+                "text": text.strip(),
+            })
+    
+    return results
 
 class ExtractTablesInput(BaseModel):
     pdf_bytes: bytes = Field(..., description="Raw content of the PDF file.")
@@ -61,33 +89,37 @@ class ExtractTablesInput(BaseModel):
 @tool(args_schema=PDFBytesInput)
 def extract_tables(pdf_bytes: bytes) -> list:
     """
-    Extracts structured tables from the PDF.
+    Extracts structured tables from the PDF itself using PDF extractor tools. If the PDF can only be parsed by OCR this tool will not work.
 
     Returns:
         A list of table representations in structured format (e.g., Markdown or CSV).
     """
-    return [{
-        "page": 1,
-        "tables": [{
-            "name": "Expenses",
-            "data": [
-                ["Category", "Amount"],
-                ["Food", "$200"],
-                ["Transport", "$150"],
-                ["Utilities", "$100"]
-            ]
-        }]
-    }]
+    tables_data = []
+    
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp_file:
+        tmp_file.write(pdf_bytes)
+        tmp_file.flush()
 
-@tool(args_schema=PDFBytesInput)
-def extract_layout(pdf_bytes: bytes) -> dict:
-    """
-    Extracts the layout of the PDF.
+        tables = camelot.read_pdf(tmp_file.name, pages='all')
+        
+        for i, table in enumerate(tables):
+            tables_data.append({
+                "page": table.page,
+                "table_index": i,
+                "data": table.df.values.tolist()  # returns the table as list of rows
+            })
+    
+    return tables_data
 
-    Returns:
-        A dictionary containing the layout of the PDF.
-    """
-    return {"headers": ["Header A"], "footers": ["Footer B"]}
+# @tool(args_schema=PDFBytesInput)
+# def extract_layout(pdf_bytes: bytes) -> dict:
+#     """
+#     Extracts the layout of the PDF using PDF extractor tools. If the PDF can only be parsed by OCR this tool will not work.
+
+#     Returns:
+#         A dictionary containing the layout of the PDF.
+#     """
+#     return {"headers": ["Header A"], "footers": ["Footer B"]}
 
 @tool(args_schema=PDFBytesInput)
 def extract_images_from_pdf(pdf_bytes: bytes) -> list:
@@ -100,18 +132,34 @@ def extract_images_from_pdf(pdf_bytes: bytes) -> list:
     Returns:
         List[dict]: Each dict contains page number and image data or references.
     """
-    # Example stub output
-    return [
-        {"page": 1, "image_id": "fig1", "base64": "data:image/png;base64,..."},
-        {"page": 3, "image_id": "fig2", "base64": "data:image/png;base64,..."}
-    ]
+    results = []
+    pdf_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    for page_index in range(len(pdf_doc)):
+        page = pdf_doc[page_index]
+        images = page.get_images(full=True)
+
+        for img_index, img in enumerate(images):
+            xref = img[0]
+            base_image = pdf_doc.extract_image(xref)
+            image_bytes = base_image["image"]   
+            image_ext = base_image["ext"]  # 'png', 'jpeg', etc.
+
+            base64_str = base64.b64encode(image_bytes).decode("utf-8")
+            results.append({
+                "page": page_index + 1,
+                "image_id": f"page{page_index + 1}_img{img_index + 1}",
+                "base64": f"data:image/{image_ext};base64,{base64_str}"
+            })
+
+    return results
     
 class TakeScreenshotsInput(BaseModel):
     pdf_bytes: bytes = Field(description="Raw content of the PDF file.")
     pages: List[int] = Field(description="List of page numbers to screenshot.")
     
 @tool(args_schema=TakeScreenshotsInput)
-def take_screenshots(pdf_bytes: bytes, pages: list) -> list:
+def take_screenshots(pdf_bytes: bytes) -> list:
     """
     Take screenshots of specific pages from an in-memory PDF (bytes object).
 
@@ -122,70 +170,169 @@ def take_screenshots(pdf_bytes: bytes, pages: list) -> list:
     Returns:
         List[dict]: Each dict contains page number and image data or references.
     """
-    # Example stub output
-    return [
-        {"page": 1, "image_id": "fig1", "base64": "data:image/png;base64,..."},
-        {"page": 3, "image_id": "fig2", "base64": "data:image/png;base64,..."}
-    ]
+    results = []
+    pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    for index, page in enumerate(pdf):
+        page_number = index + 1  # 1-indexed page number
+        pix = page.get_pixmap(dpi=150)
+        img_bytes = BytesIO(pix.tobytes("png"))
+        base64_str = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
+
+        results.append({
+            "page": page_number,
+            "image_id": f"screenshot_page_{page_number}",
+            "base64": f"data:image/png;base64,{base64_str}"
+        })
+
+    return results
 
 @tool(args_schema=PDFBytesInput)
 def ocr(pdf_bytes: bytes) -> list:
     """
-    Extracts text from the PDF using OCR.
+    Extracts text from the PDF using OCR. This tool is useful for when the PDF has hand written text, text that doesn't seem extractable with standard PDF tools.
 
     Returns:
         A list of text extracted from the PDF.
     """
-    return [{
-        "page": 1,
-        "text": "This is the OCR text extracted from page 1 of the PDF.",
-    }]
+    results = []
+    try:
+        pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-extractor_llm = ChatOpenAI(model="gpt-3.5-turbo")
-extractor_agent = create_react_agent(extractor_llm, [parse_text, extract_tables, extract_layout, ocr])
+        for page_index, page in enumerate(pdf):
+            pix = page.get_pixmap(dpi=300)  # Higher DPI improves OCR accuracy
+            image = Image.open(io.BytesIO(pix.tobytes("png")))
+
+            text = pytesseract.image_to_string(image)
+            results.append({
+                "page": page_index + 1,
+                "text": text.strip()
+            })
+
+        pdf.close()
+    except Exception as e:
+        results.append({"error": str(e)})
+
+    return results
+
+tool_node = ToolNode([parse_text, extract_tables, ocr, extract_images_from_pdf, take_screenshots])
+
+### Utils for taking screenshots used for processing the tool usage
+def pdf_bytes_to_base64_images(pdf_bytes: bytes, num_of_screenshots: int):
+    base64_images = []
+    pdf = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    num_pages = len(pdf)
+    pages_to_render = min(num_of_screenshots, num_pages)
+
+    for page in pdf[:pages_to_render]:
+        pix = page.get_pixmap(dpi=150)
+        img_bytes = BytesIO(pix.tobytes("png"))
+
+        # Encode to base64
+        base64_str = base64.b64encode(img_bytes.getvalue()).decode("utf-8")
+        base64_images.append(base64_str)
+
+    return base64_images
+
+# Take screenshot of the first 2-3 pages to understand the type of content
+def take_initial_screenshots(pdf_bytes: bytes, num_of_screenshots: int):
+    images = pdf_bytes_to_base64_images(pdf_bytes, num_of_screenshots)
+    save_base64_images_to_disk(images)
+    return images
+
+extractor_llm = ChatOpenAI(model="gpt-4o", model_kwargs={"tool_choice": "required"}).bind_tools([parse_text, extract_tables, ocr])
+# extractor_agent = create_react_agent(extractor_llm,
+#             [parse_text, extract_tables, ocr],
+#             version="v1",
+#             prompt="You are a multi modal agent that decides tool usage.")
 
 def extractor_node(state: StructureState) -> LGCommand[str]:
     pdf_data = state.envelope.get("pdf")
-    screenshots = state.envelope.get("screenshots", [])
+    screenshots = take_initial_screenshots(pdf_data, 1)
     cfg = state.config
 
     input_prompt = f"""
-Analyze the PDF. Use tools to extract structure and content. At least one tool must be returned.
-Available tools:
-- parse_text
-- ocr
-- extract_layout
-{('- extract_tables' if cfg.look_for_queryable_tables else '')}
-{('- extract_images_from_pdf' if cfg.extract_and_embed_images else '')}
-{('- take_screenshots' if cfg.extract_and_embed_images else '')}
+    You are given one or more screenshots from a native PDF document as a visual reference only.These screenshots are provided to help you assess the type and structure of the actual PDF document, which may contain either selectable text or scanned images.
 
-Screenshots (preview only): {screenshots}
+📌 Your task:
+1. Determine whether the PDF pages are primarily composed of:
+    * Selectable (native) text, or
+    * Scanned images (e.g., photos of text, image-only pages)
+        * Look for deformities in the picture that comes from the process of taking the picture, colour misalignment, bending of the pages and so on.
+2. Based on this assessment, choose the appropriate tools to extract structured data for agentic ingestion.
+
+🛠️ Tool Selection Rules
+* ✅ If the document contains selectable text:→ Based on visual structure in the screenshot(s), choose from:
+    * parse_text – for raw text extraction
+    {('& extract_tables if tables are visually present' if cfg.look_for_queryable_tables else '')}
+{("* Additionally, use as needed:"
+    "* extract_images_from_pdf"
+    "* take_screenshots" if cfg.extract_and_embed_images else '')}
+* ✅ If the document contains scanned images:→ Use:
+    * ocr – to extract text from images
+    {('* take_screenshots – if needed for visual processing or context' if cfg.extract_and_embed_images else '')}
+* (Do not use parse_text, extract_tables, or extract_images_from_pdf in this case.)
 """
 
-    messages = [{"role": "user", "content": input_prompt}]
-    result = extractor_agent.invoke(
-        {"messages": messages}
+    messages = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": input_prompt},
+            *[
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{img}"
+                    }
+                }
+                for img in screenshots
+            ]
+        ]
+    }]
+
+    result = extractor_llm.invoke(
+        messages
     )
 
-    tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
+    tool_calls = result.tool_calls
     tool_outputs = {}
-    for tm in tool_msgs:
+
+    tool_funcs = {
+        "parse_text": parse_text,
+        "ocr": ocr,
+        "extract_tables": extract_tables,
+        "extract_images_from_pdf": extract_images_from_pdf,
+        "take_screenshots": take_screenshots,
+    }
+
+    for call in tool_calls:
+        name = call["name"]
+        args = call.get("args", {})
+
+        # Always ensure the real bytes are passed, not the placeholder
+        args["pdf_bytes"] = state.envelope.get('pdf')
+
+        tool = tool_funcs.get(name)
+        if not tool:
+            continue
+
         try:
-            tool_outputs[tm.name] = json.loads(tm.content)
-        except json.JSONDecodeError:
-            tool_outputs[tm.name] = tm.content
+            out = tool.func(**args)
+            tool_outputs[name] = out
+        except Exception as e:
+            tool_outputs[name] = {"error": str(e)}
 
     extracted = {
         "text":        tool_outputs.get("parse_text", []),
         "ocr":         tool_outputs.get("ocr", []),
-        "layout":      tool_outputs.get("extract_layout", {}),
         "tables":      tool_outputs.get("extract_tables", []),
         "images":      tool_outputs.get("extract_images_from_pdf", []),
         "screenshots": tool_outputs.get("take_screenshots", []),
     }
 
     steps = state.envelope.get("steps_completed", []) + ["extractor"]
-    print('Update for extractor is: ', extracted)
     new_envelope = {
         **state.envelope.copy(),
         "extractor": extracted,
@@ -198,32 +345,28 @@ Screenshots (preview only): {screenshots}
 # SEGMENTER using trust_call
 # ────────────────────────────────────────────────
 
-segmenter_llm = ChatOpenAI(model="gpt-3.5-turbo")
-
 class SegmenterNode(BaseModel):
-    sections: List[str]
+    sections: list[str] = Field(..., description="The sections of the document.")
 
-bound_segmenter = create_extractor(
-    segmenter_llm,
-    tools=[SegmenterNode],
-    tool_choice="SegmenterNode",
-)
+segmenter_llm = ChatOpenAI(model="gpt-3.5-turbo").with_structured_output(SegmenterNode)
 
 def segmenter_node(state: StructureState) -> LGCommand[str]:
     """Segment the document into high-level sections based on extracted text and layout."""
     prompt = f"""
 You are a document segmenter. Based on the extracted text and layout, split the content into high-level sections.
-Text: {state.envelope.get("extractor", {}).get("text", [])}
-Layout: {state.envelope.get("extractor", {}).get("layout", [])}
+Text: {cap_text_length(state.envelope.get("extractor", {}).get("text", []))}
+Layout: {cap_text_length(state.envelope.get("extractor", {}).get("layout", []))}
 """
     messages = [{"role": "user", "content": prompt}]
-    response = bound_segmenter.invoke(
+    response: AIMessage = segmenter_llm.invoke(
         messages
     )
+
+    segment_text = response.dict()
     steps = state.envelope.get("steps_completed", []) + ["segmenter"]
     new_envelope = {
         **state.envelope.copy(),
-        "segment_output": response["responses"][0].dict(),
+        "segment_output": segment_text,
         "steps_completed": steps
     }
     return LGCommand(goto="orchestrator_node", update={"envelope": new_envelope})
@@ -232,33 +375,30 @@ Layout: {state.envelope.get("extractor", {}).get("layout", [])}
 # SEMANTIC NODE using trust_call
 # ────────────────────────────────────────────────
 
-semantic_llm = ChatOpenAI(model="gpt-3.5-turbo")
-
 class SemanticNode(BaseModel):
     entities: List[str]
     summary: List[str]
 
-bound_semantic = create_extractor(
-    semantic_llm,
-    tools=[SemanticNode],
-    tool_choice="SemanticNode",
-)
+
+semantic_llm = ChatOpenAI(model="gpt-3.5-turbo").with_structured_output(SemanticNode)
 
 def semantic_node(state: StructureState) -> LGCommand[str]:
     """Summarize sections and extract entities from the document."""
+    print('Segment output is', state.envelope.get("segment_output", {}))
     prompt = f"""
 Summarize each section and extract entities.
-Sections: {state.envelope.get("segment_output", {}).get("sections", [])}
-Text: {state.envelope.get("extractor", {}).get("text", [])}
+Sections: {cap_text_length_raw(state.envelope.get("segment_output", {}).get("sections", []))}
+Text: {cap_text_length(state.envelope.get("extractor", {}).get("text", []))}
 """
     messages = [{"role": "user", "content": prompt}]
-    response = bound_semantic.invoke(
+    response = semantic_llm.invoke(
         messages
     )
+    semantic_text = response.dict()
     steps = state.envelope.get("steps_completed", []) + ["semantic"]
     new_envelope = {
         **state.envelope.copy(),
-        "semantic_output": response["responses"][0].dict(),
+        "semantic_output": semantic_text,
         "steps_completed": steps
     }
     return LGCommand(goto="orchestrator_node", update={"envelope": new_envelope})
@@ -276,8 +416,8 @@ def relationship_mapper(state: StructureState) -> LGCommand[str]:
     prompt = f"""
 You are mapping relationships across document content.
 Use section summaries and entities to infer relationships.
-Entities: {state.envelope.get("semantic_output", {}).get("entities", [])}
-Summaries: {state.envelope.get("semantic_output", {}).get("summary", [])}
+Entities: {cap_text_length_raw(state.envelope.get("semantic_output", {}).get("entities", []))}
+Summaries: {cap_text_length_raw(state.envelope.get("semantic_output", {}).get("summary", []))}
 """
     messages = [{"role": "system", "content": prompt}]
     
@@ -303,11 +443,11 @@ def aggregator_node(state: StructureState) -> LGCommand[str]:
     final_data = {
         **envelope,
         "final_structured_output": {
-            "text": envelope.get("text"),
-            "tables": envelope.get("tables"),
-            "sections": envelope.get("sections"),
-            "summary": envelope.get("summary"),
-            "entities": envelope.get("entities"),
+            "text": envelope.get("extractor").get("text"),
+            "tables": envelope.get("extractor").get("tables"),
+            "sections": envelope.get("segment_output").get("sections"),
+            "summary": envelope.get("semantic_output").get("summary"),
+            "entities": envelope.get("semantic_output").get("entities"),
             "relationships": envelope.get("relationships"),
         }
     }
