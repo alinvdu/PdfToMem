@@ -9,7 +9,7 @@ function App() {
   const { state, tools, error, callTool, retry, authenticate } = useMcp({
     url: 'http://localhost:8000/mcp',
     clientName: 'pdf_ingest',
-    autoReconnect: true
+    autoReconnect: true,
   });
 
   // Modal visibility
@@ -98,6 +98,7 @@ function App() {
   const startStorage = async () => {
     if (!ingestionData) return;
     setIsStorageLoading(true);
+    console.log('calling with ingestion data', JSON.stringify(ingestionData))
     try {
       const res = await fetch('http://localhost:1000/storage_ingest', {
         method: 'POST',
@@ -351,7 +352,7 @@ function App() {
           {queryResponse && (
             <div style={{ marginTop: 12, padding: '15px', display: "flex", flexDirection: "column", background: "rgba(25, 25, 25, 0.55)", borderRadius: 21, boxSizing: "border-box", width: 800 }}>
               <div style={{ color: 'white', marginTop: 5, justifyContent: "space-between", fontSize: 15 }}>{queryResponse.response}</div>
-              <div style={{display: "flex", justifyContent: "space-between", aligmItems: "center"}}>
+              <div style={{display: "flex", justifyContent: "space-between", alignItems: "center"}}>
                 <div style={{ marginTop: 10, fontSize: 14, color: 'white', alignItems: "center" }}>
                   <strong>Used Memory Sources:</strong> {queryResponse.selected_queries.join(', ')}
                 </div>

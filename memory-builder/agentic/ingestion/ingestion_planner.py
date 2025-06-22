@@ -1,12 +1,11 @@
 from langgraph_reflection import create_reflection_graph
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langgraph.types import Command as LGCommand
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 from openevals.llm import create_llm_as_judge
-from typing import Dict, Any, Optional, TypedDict
+from typing import Dict, Any, Optional, TypedDict, List, Literal, Union
 from configs import MCPConfig
-from pydantic import BaseModel
-from typing import List
+from pydantic import BaseModel, RootModel
 from langchain_core.messages import AIMessage
 
 
@@ -23,13 +22,47 @@ class PlannerState(BaseModel):
     visual_plan: Optional[str] = None
     plan: Optional[str] = None
 
+class SentenceWindowIndexParams(BaseModel):
+    window_size: int
+
+class SimpleSentenceIndexParams(BaseModel):
+    chunk_size: int
+
+class AutoMergingIndexParams(BaseModel):
+    chunk_sizes: List[int]
+
+class SemanticIndexParams(BaseModel):
+    pass  # No params for this one
+
+class StrategyOutput(BaseModel):
+    strategy: Literal[
+        "SimpleSentenceIndex",
+        "SentenceWindowIndex",
+        "AutoMergingIndex",
+        "SemanticIndex"
+    ]
+    query_node_description: str
+    params: Union[
+        SentenceWindowIndexParams,
+        SimpleSentenceIndexParams,
+        AutoMergingIndexParams,
+        SemanticIndexParams
+    ]
+    reasoning: str
+
+class ChunkingStrategies(BaseModel):
+    strategies: List[StrategyOutput]
+
 ### Reflection utils, assistant
 # Define the main assistant model that will generate responses
-llm_model = ChatOpenAI(model="gpt-3.5-turbo")
+llm_model = ChatOpenAI(model="o3-mini").with_structured_output(ChunkingStrategies)
 
 def call_model(state):
     """Process the user query with a large language model."""
-    return {"messages": llm_model.invoke(state["messages"])}
+    response = llm_model.invoke(state["messages"]).dict()
+    return {"messages": {
+        "role": "assistant",
+        "content": json.dumps(response)}}
 
 assistant_graph = (
     StateGraph(MessagesState)
@@ -45,18 +78,12 @@ class Finish(TypedDict):
     finish: bool
 
 # ────────────────────────────────────────────────
-# LLM SETUP
-# ────────────────────────────────────────────────
-
-llm = ChatOpenAI(model="gpt-3.5-turbo")
-
-# ────────────────────────────────────────────────
 # CHUNKING AGENT (Reflection)
 # ────────────────────────────────────────────────
 
 def chunking_assistant_node(state: MessagesState):
     """Generate chunking strategy for document indexing."""
-    return {"messages": llm.invoke(state["messages"])}
+    return {"messages": llm_model.invoke(state["messages"])}
 
 def truncate_long_values(obj, char_limit=3000):
     """Recursively truncate string values in a dictionary or list."""
@@ -79,22 +106,25 @@ def get_chunking_prompt(envelope, char_limit=3000):
     # Recursively truncate long values
     truncated_envelope = truncate_long_values(filtered_envelope, char_limit)
 
+    document_text = "\n".join(chunk.get("text", "") for chunk in truncated_envelope.get('text'))
+
     return f"""You are a Chunking Strategy Agent.
 
-    Analyze the document structure below and propose a LlamaIndex ingestion strategy.
-    Part of your strategy you have to define the indices you are going to use. The following indices are available including their parameters.
-    And you also need to give a name for the query so then when the index is going to be used by an LLM, it knows what it does.
-
-    1. Simple Sentence Index
-    2. Sentence Window Index
-        parameters:
+    Analyze the document structure below and propose a LlamaIndex ingestion strategy for this particular type of document.
+    Part of your strategy you have to define the indices you are going to use and to give a name for the query so then when
+    the index is going to be used by an LLM, it knows what it does. The following indices are available including their parameters:
+    1. SimpleSentenceIndex -> Text is chunked on multiple smaller chunks, one or more texts are retrieved but context around is lost.
+    This doesn't split context by sentences but by the specified chunk amount.
+        - chunk_size: int
+    2. SentenceWindowIndex -> Just like SimpleSentenceIndex but it adds a window around each chunk. Ideal for answering questions that depend on 
+    relationships between adjacent concepts. The window provides an opportunity to look around the found chunk.
         - window_size: int
-    2. Auto Merging Index
+    2. AutoMergingIndex -> Automatically merges smaller semantic units into meaningful chunks depending on context. Useful for high-density documents like 
+        specifications and APIs where the response might include adjacent concepts part of other chunks.
         - chunk_sizes: list[int], for instance [2048, 512, 128]
-    3. Semantic Index
-        - buffer_size (int): number of sentences to group together when evaluating semantic similarity.
-        - include_metadata (bool): whether to include metadata in nodes.
+    3. SemanticIndex -> Divides the text into higher level semantics and splits according to ideas rather than fixed sizes.
 
+    Here is a minimal example:
     Return a JSON like:
     [{{
     "strategy": "SentenceWindowIndex",
@@ -102,11 +132,14 @@ def get_chunking_prompt(envelope, char_limit=3000):
     "params": {{
         "window_size": 3
     }},
-    "reasoning": "Propose text with concepts that span accross, therefore sentence window index is a possible candidate"
+    "reasoning": "Propose text with concepts that span accross but not too much and its not hierarchical, therefore sentence window index is a perfect candidate"
     }}] where multiple strategies returned in a list
 
     Document Structure (this include the actual text + other metadata):
-    {truncated_envelope}
+    {document_text}
+
+    Guidelines:
+    - Reason through which concepts make sense to the given document information.
     """
 
 chunking_judge_prompt = """You are a strategy reviewer. Here's the proposed chunking/indexing plan:
@@ -160,10 +193,12 @@ chunking_judge_graph = (
 reflection_chunking = create_reflection_graph(assistant_graph, chunking_judge_graph)
 reflection_chunking = reflection_chunking.compile()
 
+import json
+
 def chunking_node(state):
     prompt = get_chunking_prompt(state.envelope.get('final_structured_output'))
     result = reflection_chunking.invoke({"messages": prompt})
-
+    print('result is', result)
     ai_message = next(
         (msg for msg in result["messages"] if isinstance(msg, AIMessage)),
         None
@@ -173,15 +208,22 @@ def chunking_node(state):
         ai_message = {
             'content': 'No plan'
         }
-    plan_str = ai_message.content.strip()
 
-    print("✅ Parsed chunking plan:", plan_str)
+    # Safely parse the content as JSON
+    try:
+        plan_data = json.loads(ai_message.content.strip())
+        strategies = plan_data.get("strategies", [])
+    except json.JSONDecodeError:
+        strategies = []
+        plan_data = {"strategies": []}
+
+    print("✅ Parsed chunking plan:", strategies)
     new_planner_steps = (state.planner_steps or []) + ['chunking']
 
     # update the state for chunking
     return LGCommand(
         goto="planner_orchestrator",
-        update={"chunking_plan": plan_str, "planner_steps": new_planner_steps}
+        update={"chunking_plan": json.dumps(strategies), "planner_steps": new_planner_steps}
     )
 
 # ────────────────────────────────────────────────
@@ -190,7 +232,7 @@ def chunking_node(state):
 
 def kg_assistant_node(state: MessagesState):
     """Generate knowledge graph indexing strategy based on entities and relationships."""
-    return {"messages": llm.invoke(state["messages"])}
+    return {"messages": llm_model.invoke(state["messages"])}
 
 kg_prompt = """You are planning a knowledge graph-based indexing strategy based on document entities/relationships.
 
@@ -244,7 +286,7 @@ kg_graph = create_reflection_graph(
 
 def visual_assistant_node(state: MessagesState):
     """Generate visual chunking strategy for documents with visual elements."""
-    return {"messages": llm.invoke(state["messages"])}
+    return {"messages": llm_model.invoke(state["messages"])}
 
 visual_prompt = """The document includes visual elements. Propose a visual chunking/indexing strategy using screenshots, OCR, or CLIP embeddings.
 

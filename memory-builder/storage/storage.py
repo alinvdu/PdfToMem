@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import traceback
 from llama_index.core import (
     VectorStoreIndex
@@ -11,8 +11,8 @@ load_dotenv()
 
 from llama_index.llms.openai import OpenAI
 from llama_index.core.tools import QueryEngineTool
-from llama_index.core.node_parser import SentenceWindowNodeParser, SemanticSplitterNodeParser
-from llama_index.core.query_engine import RouterQueryEngine
+from llama_index.core.node_parser import SentenceWindowNodeParser, SemanticSplitterNodeParser, SentenceSplitter
+from llama_index.core.query_engine import RouterQueryEngine, RetrieverQueryEngine
 from llama_index.core.selectors import LLMSingleSelector
 from llama_index.core.schema import TextNode
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +20,14 @@ from llama_index.core import Document
 from typing import Any
 from llama_index.core.indices.postprocessor import MetadataReplacementPostProcessor
 from llama_index.core.indices.postprocessor import SentenceTransformerRerank
+from llama_index.core import Settings
+from llama_index.llms.openai import OpenAI
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.core.node_parser import HierarchicalNodeParser
+from llama_index.core.node_parser import get_leaf_nodes
+from llama_index.core import StorageContext
+from llama_index.core.storage.docstore import SimpleDocumentStore
+from llama_index.core.retrievers import AutoMergingRetriever
 import logging
 import llama_index
 app = FastAPI()
@@ -52,29 +60,38 @@ class StructureEnvelope(BaseModel):
     final_structured_output: Any
 
 class IngestionPlanParams(BaseModel):
-    window_size: int
+    window_size: Optional[int] = None
 
 class IngestionPlanItem(BaseModel):
     strategy: str
     query_node_description: str
-    params: IngestionPlanParams
+    params: Optional[IngestionPlanParams] = None
     reasoning: str
 
 class RequestBody(BaseModel):
     structure_envelope: StructureEnvelope
     ingestion_plan: List[IngestionPlanItem]
 
-from llama_index.core import Settings
-from llama_index.llms.openai import OpenAI
-from llama_index.embeddings.openai import OpenAIEmbedding
-
 Settings.llm = OpenAI(model="gpt-3.5-turbo")
-Settings.embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
+embed_model = OpenAIEmbedding(model="text-embedding-ada-002")
+Settings.embed_model = embed_model
 
-def build_sentence_window_index(document, embed_model="local:BAAI/bge-small-en-v1.5",
+def build_sentence_index(document, chunk_size="512", save_dir="simple_sentence_index"):
+    splitter = SentenceSplitter(chunk_size)
+    nodes = splitter.get_nodes_from_documents([document])
+    print(len(nodes))
+    index = VectorStoreIndex(nodes)
+    index.storage_context.persist(persist_dir=save_dir)
+
+    return index
+
+def get_sentence_query_engine(index, similarity_top_k=6):
+    return index.as_query_engine(similarity_top_k=similarity_top_k)
+
+def build_sentence_window_index(document, window_size = 3,
                                 save_dir="sentence_index"):
     node_parser = SentenceWindowNodeParser.from_defaults(
-        window_size=3,
+        window_size=window_size,
         window_metadata_key="window",
         original_text_metadata_key="original_text"
     )
@@ -105,10 +122,8 @@ from llama_index.core import StorageContext
 from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.core.retrievers import AutoMergingRetriever
 
-def build_automerging_index(documents, llm,
+def build_automerging_index(documents,
                             save_dir="merging_index", chunk_sizes=None):
-    if llm is not None:
-        Settings.llm = llm
     chunk_sizes = chunk_sizes or [2048, 512, 128]
     node_parser = HierarchicalNodeParser.from_defaults(chunk_sizes=chunk_sizes)
     Settings.node_parser = node_parser
@@ -126,6 +141,38 @@ def build_automerging_index(documents, llm,
     merging_index.storage_context.persist(persist_dir=save_dir)
         
     return merging_index
+
+def get_automerging_query_engine(automerging_index, similarity_top_k=12,
+                                 rerank_top_n=2):
+    base_retriever = automerging_index.as_retriever(similarity_top_k=similarity_top_k)
+    retriever = AutoMergingRetriever(
+        base_retriever,
+        automerging_index.storage_context,
+        verbose=True
+    )
+    rerank = SentenceTransformerRerank(
+        top_n=rerank_top_n, model="BAAI/bge-reranker-base"
+    )
+    auto_merging_engine = RetrieverQueryEngine(
+        retriever,
+        node_postprocessors=[rerank]
+    )
+    
+    return auto_merging_engine
+
+def build_semantic_index(documents):
+    splitter = SemanticSplitterNodeParser(
+        buffer_size=1, breakpoint_percentile_threshold=95, embed_model=embed_model
+    )
+    nodes = splitter.get_nodes_from_documents(documents)
+    index = VectorStoreIndex(nodes)
+
+    return index
+
+def get_semantic_query_engine(index, similarity_top_k=12):
+    query_engine = index.as_query_engine(similarity_top_k=similarity_top_k)
+
+    return query_engine
 
 
 @app.post("/storage_ingest")
@@ -148,22 +195,36 @@ async def storage_ingest(request: RequestBody):
         strategy = plan.strategy
         params = plan.params or {}
         index = None
+        query_engine = None
 
-        if strategy == "SentenceWindowIndex":
-            index = build_sentence_window_index(document, save_dir="sentence_index")
-            print('Using sentence')
+        print('params are', params)
+
+        if strategy == "SimpleSentenceIndex":
+            # the most basic representation:
+            index = build_sentence_index(document, save_dir="simple_sentence_index")
+            query_engine = get_sentence_query_engine(index)
+        elif strategy == "SentenceWindowIndex":
+            window_size = 3
+            if 'window_size' in params:
+                window_size = params.get('window_size')
+            index = build_sentence_window_index(document, window_size, save_dir="sentence_index")
+            query_engine = get_sentence_window_query_engine(index)
         elif strategy == "AutoMergingIndex":
+            chunk_sizes = [2048, 512, 128]
+            if 'chunk_sizes' in params:
+                chunk_sizes = params.get('chunk_sizes')
             index = build_automerging_index(
-                document,
+                [document],
+                chunk_sizes=chunk_sizes,
                 save_dir="merging_index",
             )
+            query_engine = get_automerging_query_engine(index)
+        elif strategy == "SemanticIndex":
+            index = build_semantic_index([document])
+            query_engine = get_semantic_query_engine(index)
         else:
             raise ValueError(f"Unsupported parser: {strategy}")
 
-        if strategy == "SentenceWindowIndex":
-            query_engine = get_sentence_window_query_engine(index)
-        else:
-            query_engine = index.as_query_engine()
         tool = QueryEngineTool.from_defaults(
             query_engine=query_engine,
             name=strategy,

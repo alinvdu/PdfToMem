@@ -8,7 +8,7 @@ import json
 
 from langchain.tools import tool
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 from configs import MCPConfig
 from langchain.globals import set_debug
 from typing_extensions import Annotated
@@ -377,7 +377,7 @@ Layout: {cap_text_length(state.envelope.get("extractor", {}).get("layout", []))}
 
 class SemanticNode(BaseModel):
     entities: List[str]
-    summary: List[str]
+    summary: Optional[List[str]] = None
 
 
 semantic_llm = ChatOpenAI(model="gpt-3.5-turbo").with_structured_output(SemanticNode)
@@ -417,7 +417,7 @@ def relationship_mapper(state: StructureState) -> LGCommand[str]:
 You are mapping relationships across document content.
 Use section summaries and entities to infer relationships.
 Entities: {cap_text_length_raw(state.envelope.get("semantic_output", {}).get("entities", []))}
-Summaries: {cap_text_length_raw(state.envelope.get("semantic_output", {}).get("summary", []))}
+Summaries: {(lambda s: cap_text_length_raw(s) if s else None)(state.envelope.get("semantic_output", {}).get("summary"))}
 """
     messages = [{"role": "system", "content": prompt}]
     
