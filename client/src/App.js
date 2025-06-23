@@ -9,7 +9,7 @@ function App() {
   const { state, tools, error, callTool, retry, authenticate } = useMcp({
     url: 'http://localhost:8000/mcp',
     clientName: 'pdf_ingest',
-    autoReconnect: true,
+    autoReconnect: true
   });
 
   // Modal visibility
@@ -64,7 +64,7 @@ function App() {
     );
   }
   if (state !== 'ready') {
-    return <div className="full-screen-message">Connecting to AI service...</div>;
+    return <div className="full-screen-message"><div className="spinner"/><span>Connecting to AI service</span></div>;
   }
 
   const handleInputChange = (name, value) => setInputValues(prev => ({ ...prev, [name]: value }));
@@ -84,7 +84,7 @@ function App() {
     setIsToolLoading(true);
     try {
       const result = await callTool(selectedTool.name, inputValues);
-      if (!result.isError && selectedTool.name === 'determine_pdf_ingestion_architecture_and_memory_representation') {
+      if (!result.isError && selectedTool.name === 'determine_memory_architecture') {
         const parsed = JSON.parse(result.content[0].text);
         parsed.ingestion_plan = JSON.parse(parsed.ingestion_plan);
         setIngestionData(parsed);
