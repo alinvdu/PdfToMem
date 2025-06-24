@@ -8,6 +8,9 @@ It exposes a powerful **MCP Server** to coordinate ingestion, reasoning, storage
 
 ---
 
+## 🎥 Video Walkthrough
+![Video Icon](https://github.com/user-attachments/assets/d8e0adb1-c455-43e7-9b7a-b01d14581042)[Watch the video](https://example.com/video.mp4)
+
 ## 🧠 MCP Server — _Memory Control Plane_
 
 The **MCP Server** is the brain of PdfToMem. It leverages tool-based reasoning to:
