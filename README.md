@@ -9,7 +9,7 @@ It exposes a powerful **MCP Server** to coordinate ingestion, reasoning, storage
 ---
 
 ## 🎥 Video Walkthrough
-![Video Icon](https://github.com/user-attachments/assets/d8e0adb1-c455-43e7-9b7a-b01d14581042)[Watch the video](https://example.com/video.mp4)
+[![Video Icon](https://github.com/user-attachments/assets/d8e0adb1-c455-43e7-9b7a-b01d14581042)](https://www.youtube.com/watch?v=KzMl4TJMBNM)
 
 ## 🧠 MCP Server — _Memory Control Plane_
 
